@@ -1,0 +1,6 @@
+python-docx
+openpyxl
+PyMuPDF
+Pillow
+pytesseract
+gliner
