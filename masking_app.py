@@ -25,6 +25,16 @@ SUPPORTED = (
       "*.png *.jpg *.jpeg *.bmp *.tiff *.tif")]
 )
 
+# 드롭 시 받아들일 확장자
+SUPPORTED_EXTS = TEXT_EXTS | IMAGE_EXTS | {".docx", ".xlsx", ".pdf"}
+
+# 드래그 앤 드롭 지원 여부 (tkinterdnd2 설치 시)
+try:
+    from tkinterdnd2 import DND_FILES, TkinterDnD  # noqa
+    HAS_DND = True
+except Exception:
+    HAS_DND = False
+
 
 class MaskingApp:
     def __init__(self, root):
@@ -81,7 +91,9 @@ class MaskingApp:
             lambda e: canvas.yview_scroll(int(-1 * e.delta), "units"))
 
         # 1) 파일 선택
-        frm_files = ttk.LabelFrame(body, text="1. 마스킹할 파일")
+        drop_hint = ("1. 마스킹할 파일  (여기로 끌어다 놓거나 [파일 추가])"
+                     if HAS_DND else "1. 마스킹할 파일")
+        frm_files = ttk.LabelFrame(body, text=drop_hint)
         frm_files.pack(fill="both", expand=False, **pad)
 
         self.lst = tk.Listbox(frm_files, height=6, selectmode=tk.EXTENDED)
@@ -89,6 +101,14 @@ class MaskingApp:
         sb = ttk.Scrollbar(frm_files, command=self.lst.yview)
         sb.pack(side="left", fill="y", pady=8)
         self.lst.config(yscrollcommand=sb.set)
+
+        # 드래그 앤 드롭 등록 (tkinterdnd2 설치 + 루트가 TkinterDnD일 때만)
+        if HAS_DND:
+            try:
+                self.lst.drop_target_register(DND_FILES)
+                self.lst.dnd_bind("<<Drop>>", self._on_drop)
+            except Exception:
+                pass
 
         btns = ttk.Frame(frm_files)
         btns.pack(side="left", fill="y", padx=8, pady=8)
@@ -189,12 +209,37 @@ class MaskingApp:
         for v in self.type_vars.values():
             v.set(val)
 
-    def add_files(self):
-        paths = filedialog.askopenfilenames(title="파일 선택", filetypes=SUPPORTED)
+    def _add_paths(self, paths, check_ext=False):
+        """경로 목록을 파일 목록에 추가. 반환: (추가됨, 건너뜀)"""
+        added, skipped = 0, 0
         for p in paths:
+            p = (p or "").strip()
+            if not p or not os.path.isfile(p):
+                continue
+            if check_ext and os.path.splitext(p)[1].lower() not in SUPPORTED_EXTS:
+                skipped += 1
+                continue
             if p not in self.files:
                 self.files.append(p)
                 self.lst.insert(tk.END, p)
+                added += 1
+        return added, skipped
+
+    def add_files(self):
+        paths = filedialog.askopenfilenames(title="파일 선택", filetypes=SUPPORTED)
+        self._add_paths(paths)
+
+    def _on_drop(self, event):
+        """Finder에서 끌어다 놓은 파일들을 목록에 추가."""
+        try:
+            paths = self.root.tk.splitlist(event.data)
+        except Exception:
+            paths = event.data.split()
+        added, skipped = self._add_paths(paths, check_ext=True)
+        msg = f"{added}개 추가"
+        if skipped:
+            msg += f", 지원하지 않는 형식 {skipped}개 제외"
+        self.status.config(text=msg)
 
     def remove_selected(self):
         for i in reversed(self.lst.curselection()):
@@ -337,7 +382,14 @@ def _force_redraw(root):
 
 
 def main():
-    root = tk.Tk()
+    # 드래그 앤 드롭 지원 루트(설치 시), 아니면 일반 Tk
+    if HAS_DND:
+        try:
+            root = TkinterDnD.Tk()
+        except Exception:
+            root = tk.Tk()
+    else:
+        root = tk.Tk()
 
     # 1) ttk 위젯을 Tk가 직접 그리는 'clam' 테마로 강제 → 구버전 native 렌더러 버그 회피
     try:

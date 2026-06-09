@@ -3,4 +3,5 @@ openpyxl
 PyMuPDF
 Pillow
 pytesseract
+tkinterdnd2
 gliner

@@ -1,13 +1,24 @@
+# 가상환경 (용량 크고 사람마다 새로 만들어야 함)
 .venv/
 venv/
+
+# 파이썬 캐시
 __pycache__/
 *.pyc
 *.pyo
+
+# macOS
 .DS_Store
+
+# 다운로드된 NER 모델 캐시 (각자 받으면 됨)
 models/
 *.pt
 *.onnx
+
+# 테스트/작업 산출물
 _test/
 *_masked.*
+
+# 에디터
 .vscode/
 .idea/

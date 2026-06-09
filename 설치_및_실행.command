@@ -37,7 +37,7 @@ NER_FLAG=".venv/.ner_installed"
 if [ ! -f "$CORE_FLAG" ]; then
   echo "필수 라이브러리를 설치합니다... (1~2분)"
   # --no-compile : 일부 패키지의 바이트컴파일 충돌을 피한다
-  if $PIP install --no-compile python-docx openpyxl PyMuPDF Pillow pytesseract; then
+  if $PIP install --no-compile python-docx openpyxl PyMuPDF Pillow pytesseract tkinterdnd2; then
     touch "$CORE_FLAG"
   else
     echo "[오류] 필수 라이브러리 설치에 실패했습니다. 인터넷 연결을 확인하세요."
