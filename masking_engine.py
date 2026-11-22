@@ -86,6 +86,73 @@ def _longnum_part(match):
     return new_digits
 
 
+# --- 키워드 기반(문맥) 탐지용 마스킹 함수 ------------------------------------
+#   예약번호·PIN 처럼 형식이 제각각인 값은 "예약번호:", "PIN" 같은 키워드 뒤에
+#   오는 값만 잡는다. 패턴의 (?P<val>...) 그룹만 가리고 키워드는 그대로 둔다.
+
+def _mask_chars(s):
+    return "".join("●" if ch.isalnum() else ch for ch in s)
+
+
+def _ctx_full(value):
+    return _mask_chars(value)
+
+
+def _reservation_part(value):
+    """예약번호 부분 가리기: 앞 2자리만 남김 (ABC12345 -> AB●●●●●●)."""
+    if len(value) <= 4:
+        return _mask_chars(value)
+    return value[:2] + _mask_chars(value[2:])
+
+
+def _secret_full(value):
+    """PIN·비밀번호: 특수문자까지 모든 글자를 가린다 (자리수만 남음)."""
+    return "●" * len(value)
+
+
+def _secret_part(value):
+    """PIN·비밀번호는 일부만 노출해도 위험하므로 부분 가리기도 전부 가림."""
+    return _secret_full(value)
+
+
+# 키워드와 값 사이 구분자: 공백, 콜론(:/：), #, 'No.', 'is', 'は' 등
+_SEP = r"(?:\s*(?:[:：#=]|No\.?|is|は|은|는|:)?\s*)"
+
+_RESERVATION_KW = (
+    r"(?i:"
+    r"예약\s*(?:확인\s*)?(?:번호|코드)|예매\s*(?:번호|코드)|예약\s*no\.?"
+    r"|(?:booking|reservation|confirmation)\s*(?:no\.?|number|code|ref(?:erence)?|id|#)"
+    r"|PNR"
+    r"|予約(?:確認)?(?:番号|コード)|確認番号"
+    r")"
+)
+# 값: 숫자가 하나 이상 섞인 영숫자 4~30자, 또는 대문자 5~8자(항공 PNR 등)
+_RESERVATION_VAL = r"(?P<val>(?=[A-Za-z0-9-]*\d)[A-Za-z0-9][A-Za-z0-9-]{3,29}|[A-Z]{5,8})(?![A-Za-z0-9])"
+
+_PIN_KW = (
+    r"(?i:"
+    r"PIN\s*(?:번호|코드|code|number|no\.?)?|핀\s*(?:번호|코드)"
+    r"|인증\s*번호|보안\s*(?:번호|코드)|OTP|CVC|CVV|CVV2"
+    r"|카드\s*비밀번호|통장\s*비밀번호|계좌\s*비밀번호"
+    r"|暗証番号|認証番号|ピン(?:番号|コード)"
+    r")"
+)
+_PIN_VAL = r"(?P<val>\d{3,8})(?!\d)"
+
+_PASSWORD_KW = (
+    r"(?i:"
+    r"비밀\s*번호|비번|패스워드|암호|password|passwd|pwd|passcode"
+    r"|パスワード|暗号"
+    r")"
+)
+# 값: 공백·한글·가나·한자가 아닌 4~32자, 숫자나 특수문자가 1개 이상 포함
+#      ('비밀번호변경', 'Password reset' 같은 일반 문장은 제외)
+_PASSWORD_VAL = (
+    r"(?P<val>(?=[^\s]*[\d!@#$%^&*()_+\-\[\]{};'\"\\|<>?/~`.])"
+    r"[^\s:：=,，、。가-힣\u3040-\u30ff\u4e00-\u9fff]{4,32})"
+)
+
+
 PII_TYPES = [
     {
         "key": "rrn",
@@ -136,9 +203,65 @@ PII_TYPES = [
         "mask_full": _full_block,
         "mask_part": _longnum_part,
     },
+    {
+        "key": "reservation",
+        "label": "예약번호",
+        # '예약번호', 'Booking No.', 'PNR', '予約番号' 등 키워드 뒤의 값
+        "pattern": re.compile(_RESERVATION_KW + _SEP + _RESERVATION_VAL),
+        "context": True,
+        "mask_full": _ctx_full,
+        "mask_part": _reservation_part,
+    },
+    {
+        "key": "pin",
+        "label": "PIN·인증번호",
+        # 'PIN', 'PIN코드', '인증번호', 'OTP', 'CVC', '暗証番号' 등 키워드 뒤의 숫자
+        "pattern": re.compile(_PIN_KW + _SEP + _PIN_VAL),
+        "context": True,
+        "mask_full": _secret_full,
+        "mask_part": _secret_part,
+    },
+    {
+        "key": "password",
+        "label": "비밀번호",
+        # '비밀번호', 'password', 'パスワード' 등 키워드 뒤의 문자열
+        "pattern": re.compile(_PASSWORD_KW + _SEP + _PASSWORD_VAL),
+        "context": True,
+        "mask_full": _secret_full,
+        "mask_part": _secret_part,
+    },
 ]
 
 PII_BY_KEY = {t["key"]: t for t in PII_TYPES}
+
+
+def ordered_keys(keys):
+    """키워드 기반 유형을 먼저 처리해야 '예약번호 010-1234-5678' 같은 값이
+    전화번호 등 다른 규칙에 먼저 먹히지 않는다."""
+    keys = list(keys)
+    ctx = [k for k in keys if PII_BY_KEY.get(k, {}).get("context")]
+    return ctx + [k for k in keys if k not in ctx]
+
+
+def find_targets(text, keys):
+    """
+    PDF/이미지처럼 '가릴 문자열'과 위치가 필요한 곳에서 쓰는 탐지 함수.
+    반환: [(start, end, 가릴 문자열, 라벨, 전체매치문자열)]
+      - 키워드 기반 유형은 값 부분만(start/end 도 값 기준)
+    """
+    out = []
+    for key in ordered_keys(keys):
+        spec = PII_BY_KEY.get(key)
+        if not spec:
+            continue
+        for m in spec["pattern"].finditer(text):
+            if spec.get("context"):
+                out.append((m.start("val"), m.end("val"), m.group("val"),
+                            spec["label"], m.group(0)))
+            else:
+                out.append((m.start(), m.end(), m.group(0), spec["label"],
+                            m.group(0)))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -158,7 +281,7 @@ def mask_text(text, selected_keys, level="full"):
     counts = {}
     result = text
 
-    for key in selected_keys:
+    for key in ordered_keys(selected_keys):
         spec = PII_BY_KEY.get(key)
         if not spec:
             continue
@@ -166,9 +289,17 @@ def mask_text(text, selected_keys, level="full"):
 
         n = [0]
 
-        def _sub(m, _repl=repl, _n=n):
-            _n[0] += 1
-            return _repl(m)
+        if spec.get("context"):
+            # 키워드는 남기고 값(val 그룹)만 가린다
+            def _sub(m, _repl=repl, _n=n):
+                _n[0] += 1
+                whole, start = m.group(0), m.start()
+                vs, ve = m.start("val") - start, m.end("val") - start
+                return whole[:vs] + _repl(m.group("val")) + whole[ve:]
+        else:
+            def _sub(m, _repl=repl, _n=n):
+                _n[0] += 1
+                return _repl(m)
 
         result = spec["pattern"].sub(_sub, result)
         if n[0]:
@@ -258,7 +389,10 @@ if __name__ == "__main__":
     sample = (
         "홍길동 주민번호 910101-1234567, 휴대폰 010-1234-5678,\n"
         "이메일 hong@example.com, 카드 1234-5678-9012-3456,\n"
-        "계좌 110-234-567890, 여권 M12345678, 집전화 02-123-4567"
+        "계좌 110-234-567890, 여권 M12345678, 집전화 02-123-4567\n"
+        "예약번호: ABC12345, Booking Ref XYZ987, 予約番号：20261122-01, PNR KJHGFD\n"
+        "PIN코드 1234, 인증번호 482913, CVC 123, 暗証番号 9876\n"
+        "비밀번호: qwer!234, password=Hunter22, パスワード：abcd1234"
     )
     all_keys = [t["key"] for t in PII_TYPES]
     print("=== 원본 ===")

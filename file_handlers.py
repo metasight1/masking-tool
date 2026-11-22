@@ -14,7 +14,7 @@ file_handlers.py
 import os
 import shutil
 
-from masking_engine import mask_text, mask_literals, PII_BY_KEY
+from masking_engine import mask_text, mask_literals, PII_BY_KEY, find_targets
 
 TEXT_EXTS = {".txt", ".md", ".csv", ".tsv", ".log", ".json"}
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif"}
@@ -149,14 +149,20 @@ def handle_pdf(src, dst, keys, level, ner_opts):
     for page in doc:
         text = page.get_text()
         targets = {}  # 문자열 -> 라벨
+        rect_hits = []  # (rect 목록, 라벨) — 키워드 기반 값처럼 위치를 좁혀 찾은 것
 
         # 정규식 PII
-        for key in keys:
-            spec = PII_BY_KEY.get(key)
-            if not spec:
+        for _s, _e, value, label, whole in find_targets(text, keys):
+            if value == whole:
+                targets[value] = label
                 continue
-            for m in spec["pattern"].finditer(text):
-                targets[m.group(0)] = spec["label"]
+            # 키워드 기반(예약번호·PIN·비밀번호): 짧은 값이 문서 다른 곳의 같은
+            # 숫자까지 가리지 않도록, '키워드+값' 영역과 겹치는 값만 가린다.
+            ctx_rects = page.search_for(" ".join(whole.split()))
+            val_rects = page.search_for(value)
+            near = [r for r in val_rects
+                    if any(r.intersects(c) for c in ctx_rects)]
+            rect_hits.append((near or ctx_rects or val_rects, label))
 
         # NER 이름/주소
         for value, kind in _detect(text, ner_opts):
@@ -164,7 +170,9 @@ def handle_pdf(src, dst, keys, level, ner_opts):
             targets[value] = KIND_LABELS.get(kind, kind)
 
         for t, label in targets.items():
-            rects = page.search_for(t)
+            rect_hits.append((page.search_for(t), label))
+
+        for rects, label in rect_hits:
             if rects:
                 total[label] = total.get(label, 0) + 1
             for rect in rects:
@@ -200,11 +208,32 @@ def handle_image(src, dst, keys, level, ner_opts):
 
     total = {}
 
+    # OCR 단어를 이어 붙인 문장에서 번호류를 찾고, 겹치는 단어 위치를 가린다.
+    # (키워드와 값이 서로 다른 단어로 나뉘는 '예약번호 ABC123' 같은 경우 대응)
+    joined, spans = [], {}
+    pos = 0
+    for i, w in enumerate(words):
+        if not w.strip():
+            continue
+        if joined:
+            pos += 1
+        spans[i] = (pos, pos + len(w))
+        joined.append(w)
+        pos += len(w)
+    joined_text = " ".join(joined)
+    regex_hits = {}  # 단어 index -> 라벨
+    secret_labels = {PII_BY_KEY[k]["label"] for k in ("pin", "password")}
+    for s0, e0, _v, label, _w in find_targets(joined_text, keys):
+        for i, (ws, we) in spans.items():
+            if ws < e0 and we > s0 and i not in regex_hits:
+                regex_hits[i] = label
+
     def _box(i, label):
         x, y, w, h = (data["left"][i], data["top"][i],
                       data["width"][i], data["height"][i])
         word = words[i]
-        if level == "partial" and len(word) >= 2:
+        # PIN·비밀번호는 부분 가리기에서도 첫 글자까지 모두 가린다
+        if level == "partial" and len(word) >= 2 and label not in secret_labels:
             # 첫 글자만 남기고 나머지를 가린다 (글자 폭 ≈ 단어폭 / 글자수)
             char_w = w / max(len(word), 1)
             x0 = int(x + char_w)            # 첫 글자 이후부터 덮기
@@ -217,13 +246,8 @@ def handle_image(src, dst, keys, level, ner_opts):
         word = words[i]
         if not word.strip():
             continue
-        hit_label = None
         # 정규식 PII
-        for key in keys:
-            spec = PII_BY_KEY.get(key)
-            if spec and spec["pattern"].search(word):
-                hit_label = spec["label"]
-                break
+        hit_label = regex_hits.get(i)
         # NER 이름/주소 단어
         if not hit_label and word.strip() in literal_words:
             hit_label = "이름/주소"
