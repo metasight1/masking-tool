@@ -137,7 +137,7 @@ class MaskingApp:
         frm_ner.pack(fill="x", **pad)
         rowa = ttk.Frame(frm_ner)
         rowa.pack(fill="x", padx=8, pady=(8, 2))
-        ttk.Checkbutton(rowa, text="이름", variable=self.name_var).pack(side="left", padx=(0, 12))
+        ttk.Checkbutton(rowa, text="이름 (+'이름·성명' 항목)", variable=self.name_var).pack(side="left", padx=(0, 12))
         ttk.Checkbutton(rowa, text="주소", variable=self.addr_var).pack(side="left", padx=(0, 20))
         ttk.Label(rowa, text="인식 언어:").pack(side="left")
         ttk.Checkbutton(rowa, text="한국어", variable=self.lang_vars["ko"]).pack(side="left")
@@ -308,26 +308,29 @@ class MaskingApp:
             return
 
         ner_opts = None
-        if (want_name or want_addr) and langs:
+        if want_name or (want_addr and langs):
             from ner_engine import engine_available
-            if not engine_available():
+            use_model = bool(langs)
+            if langs and not engine_available():
                 if not messagebox.askokcancel(
                     "알림",
-                    "이름·주소 인식 엔진(gliner)이 설치되어 있지 않습니다.\n"
-                    "이름·주소 없이 번호류만 마스킹하고 계속할까요?"):
+                    "이름·주소 AI 인식 엔진(gliner)이 설치되어 있지 않습니다.\n"
+                    "AI 인식 없이 계속할까요?\n"
+                    "('이름·성명' 항목 옆의 이름, 주소 형식 인식, 번호류 마스킹은 동작합니다)"):
                     return
-            else:
-                thr = {"low": 0.7, "mid": 0.5, "high": 0.35}.get(
-                    self.sensitivity.get(), 0.5)
-                exclude = [w.strip() for w in self.exclude_var.get().split(",")
-                           if w.strip()]
-                ner_opts = {
-                    "langs": langs,
-                    "want_name": want_name,
-                    "want_address": want_addr,
-                    "threshold": thr,
-                    "exclude": exclude,
-                }
+                use_model = False
+            thr = {"low": 0.7, "mid": 0.5, "high": 0.35}.get(
+                self.sensitivity.get(), 0.5)
+            exclude = [w.strip() for w in self.exclude_var.get().split(",")
+                       if w.strip()]
+            ner_opts = {
+                "langs": langs,
+                "want_name": want_name,
+                "want_address": want_addr,
+                "threshold": thr,
+                "exclude": exclude,
+                "use_model": use_model,
+            }
 
         self.run_btn.config(state="disabled")
         self.status.config(text="처리 중...")

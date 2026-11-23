@@ -6,7 +6,9 @@ file_handlers.py
 
 마스킹 대상:
   - 정규식 PII (주민번호/전화/이메일/카드/계좌/여권)  -> masking_engine
-  - NER 이름/주소 (한/영/일)                          -> ner_engine (Stanza)
+  - 예약번호/PIN/비밀번호 (키워드 기반)               -> masking_engine
+  - NER 이름/주소 (한/영/일)                          -> ner_engine (GLiNER)
+  - '이름/성명' 항목명 옆의 이름                      -> name_keywords
 
 지원: .txt .md .csv / .docx / .xlsx / .pdf / 이미지(.png .jpg .jpeg .bmp .tiff)
 """
@@ -31,20 +33,26 @@ def _merge(dst_counts, more):
         dst_counts[k] = dst_counts.get(k, 0) + v
 
 
-def _detect(text, ner_opts):
-    """ner_opts = dict(langs, want_name, want_address, threshold, exclude) 또는 None."""
+def _detect(text, ner_opts, tables=None):
+    """
+    ner_opts = dict(langs, want_name, want_address, threshold, exclude, use_model) 또는 None.
+    tables   = [[[셀, ...], ...], ...]  표 구조(엑셀·Word 표·CSV) — '성명' 칸 옆/아래 인식용
+    """
     if not ner_opts:
         return set()
     langs = ner_opts.get("langs") or []
     want_name = ner_opts.get("want_name", False)
     want_address = ner_opts.get("want_address", False)
-    if not (want_name or want_address) or not langs:
+    # 언어를 고르지 않아도 '이름/성명' 항목명 기반 인식은 동작한다
+    if not want_name and not (want_address and langs):
         return set()
     from ner_engine import detect_entities
     return detect_entities(
-        text, langs, want_name, want_address,
+        text, langs, want_name, want_address and bool(langs),
         threshold=ner_opts.get("threshold", 0.5),
         exclude=ner_opts.get("exclude"),
+        tables=tables,
+        use_model=ner_opts.get("use_model", True) and bool(langs),
     )
 
 
@@ -64,7 +72,17 @@ def _mask_str(text, keys, level, literals):
 def handle_text(src, dst, keys, level, ner_opts):
     with open(src, "r", encoding="utf-8", errors="replace") as f:
         content = f.read()
-    literals = _detect(content, ner_opts)
+    tables = None
+    ext = os.path.splitext(src)[1].lower()
+    if ext in (".csv", ".tsv"):
+        import csv
+        import io
+        try:
+            delim = "\t" if ext == ".tsv" else ","
+            tables = [list(csv.reader(io.StringIO(content), delimiter=delim))]
+        except Exception:
+            tables = None
+    literals = _detect(content, ner_opts, tables)
     masked, counts = _mask_str(content, keys, level, literals)
     with open(dst, "w", encoding="utf-8") as f:
         f.write(masked)
@@ -96,7 +114,9 @@ def handle_docx(src, dst, keys, level, ner_opts):
                     _collect(p)
 
     full_text = "\n".join(p.text for p in all_paras)
-    literals = _detect(full_text, ner_opts)
+    tables = [[[cell.text for cell in row.cells] for row in table.rows]
+              for table in doc.tables]
+    literals = _detect(full_text, ner_opts, tables)
 
     for p in all_paras:
         for run in p.runs:
@@ -127,7 +147,10 @@ def handle_xlsx(src, dst, keys, level, ner_opts):
                     text_cells.append(cell)
 
     full_text = "\n".join(c.value for c in text_cells)
-    literals = _detect(full_text, ner_opts)
+    tables = [[[c if isinstance(c, str) else "" for c in row]
+               for row in ws.iter_rows(values_only=True)]
+              for ws in wb.worksheets]
+    literals = _detect(full_text, ner_opts, tables)
 
     for cell in text_cells:
         new, c = _mask_str(cell.value, keys, level, literals)
@@ -201,6 +224,8 @@ def handle_image(src, dst, keys, level, ner_opts):
     literals = _detect(full_text, ner_opts)
     # NER로 찾은 이름/주소를 단어 단위로 분해(이미지에서는 단어 단위로 가림)
     literal_words = set()
+    # '성명:홍길동' 처럼 항목명과 붙어 한 단어로 인식된 경우도 가리기 위함
+    name_literals = [v for v, k in literals if k == "name" and len(v) >= 2]
     for value, _kind in literals:
         for piece in value.replace(",", " ").split():
             if piece.strip():
@@ -250,6 +275,8 @@ def handle_image(src, dst, keys, level, ner_opts):
         hit_label = regex_hits.get(i)
         # NER 이름/주소 단어
         if not hit_label and word.strip() in literal_words:
+            hit_label = "이름/주소"
+        if not hit_label and any(nm in word for nm in name_literals):
             hit_label = "이름/주소"
         if hit_label:
             _box(i, hit_label)
