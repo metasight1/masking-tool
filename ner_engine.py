@@ -9,6 +9,7 @@ GLiNER(다국어 PII) 기반 이름/주소 인식 + 언어별 주소 정규식 �
   - download_model()                : 최초 1회 모델 다운로드(인터넷 필요)
   - detect_entities(text, langs, want_name, want_address)
         -> set[(matched_string, kind)]   kind in {"name", "address"}
+        ('이름/성명' 항목명 옆의 값도 이름으로 인식 → name_keywords.py)
   - engine_available()              : gliner 설치 여부
 """
 
@@ -108,17 +109,21 @@ def _is_excluded(val, exclude_terms):
 
 
 def detect_entities(text, langs, want_name=True, want_address=True,
-                    threshold=THRESHOLD, exclude=None, use_default_exclude=True):
+                    threshold=THRESHOLD, exclude=None, use_default_exclude=True,
+                    tables=None, use_model=True):
     """
     text          : 분석할 전체 텍스트
     langs         : ["ko","en","ja"] 중 선택 (주소 정규식 보강용)
     threshold     : 탐지 임계값 (높을수록 적게/정확히, 낮을수록 많이 잡음)
     exclude       : 마스킹에서 제외할 단어 목록(부분일치)
+    tables        : 표 데이터 [[[셀, ...], ...], ...] — '성명' 칸 옆/아래 이름 인식용
+    use_model     : False 면 GLiNER 없이 '이름/성명' 항목명 기반 인식만 수행
     반환          : set[(문자열, kind)]  kind in {"name","address"}
     """
     results = set()
-    if not text or not text.strip():
+    if (not text or not text.strip()) and not tables:
         return results
+    text = text or ""
 
     exclude_terms = list(exclude) if exclude else []
     if use_default_exclude:
@@ -130,7 +135,7 @@ def detect_entities(text, langs, want_name=True, want_address=True,
         labels += NAME_LABELS_REQ
     if want_address:
         labels += ADDR_LABELS_REQ
-    if labels:
+    if labels and use_model and text.strip():
         try:
             model = _get_model()
             for chunk in _chunks(text):
@@ -151,7 +156,17 @@ def detect_entities(text, langs, want_name=True, want_address=True,
             # 모델 미설치/로드 실패 시: 주소 정규식만이라도 적용되도록 통과
             pass
 
-    # 2) 주소 정규식 보강
+    # 2) '이름', '성명', 'Name', '氏名' 등 항목명 옆의 이름 (모델이 놓친 것 보강)
+    if want_name:
+        from name_keywords import find_names_in_text, find_names_in_table
+        names = find_names_in_text(text)
+        for rows in tables or []:
+            names |= find_names_in_table(rows)
+        for val in names:
+            if not _is_excluded(val, exclude_terms):
+                results.add((val, "name"))
+
+    # 3) 주소 정규식 보강
     if want_address:
         for lc in langs:
             pat = ADDRESS_PATTERNS.get(lc)
